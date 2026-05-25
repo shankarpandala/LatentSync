@@ -125,11 +125,15 @@ class VideoData(data.Dataset):
             )
         else:
             sampler = None
+        # pin_memory only helps with CUDA host->device transfers; on MPS/CPU it
+        # adds overhead with no benefit and can break with some workers.
+        import torch
+        pin_memory = torch.cuda.is_available()
         dataloader = data.DataLoader(
             dataset,
             batch_size=self.batch_size,
             num_workers=self.num_workers,
-            pin_memory=True,
+            pin_memory=pin_memory,
             sampler=sampler,
             shuffle=sampler is None and self.shuffle is True
         )

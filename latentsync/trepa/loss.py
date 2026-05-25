@@ -17,17 +17,21 @@ import torch.nn.functional as F
 from einops import rearrange
 from .third_party.VideoMAEv2.utils import load_videomae_model
 from ..utils.util import check_model_and_download
+from ..utils.device import get_device_str, get_autocast_dtype
 
 
 class TREPALoss:
     def __init__(
         self,
-        device="cuda",
+        device=None,
         ckpt_path="checkpoints/auxiliary/vit_g_hybrid_pt_1200e_ssv2_ft.pth",
         with_cp=False,
     ):
+        if device is None:
+            device = get_device_str()
         check_model_and_download(ckpt_path)
-        self.model = load_videomae_model(device, ckpt_path, with_cp).eval().to(dtype=torch.float16)
+        self.dtype = get_autocast_dtype(device)
+        self.model = load_videomae_model(device, ckpt_path, with_cp).eval().to(dtype=self.dtype)
         self.model.requires_grad_(False)
 
     def __call__(self, videos_fake, videos_real):
@@ -58,10 +62,13 @@ class TREPALoss:
 if __name__ == "__main__":
     torch.manual_seed(42)
 
-    # input shape: (b, c, f, h, w)
-    videos_fake = torch.randn(2, 3, 16, 256, 256, requires_grad=True).to(device="cuda", dtype=torch.float16)
-    videos_real = torch.randn(2, 3, 16, 256, 256, requires_grad=True).to(device="cuda", dtype=torch.float16)
+    device = get_device_str()
+    dtype = get_autocast_dtype(device)
 
-    trepa_loss = TREPALoss(device="cuda", with_cp=True)
+    # input shape: (b, c, f, h, w)
+    videos_fake = torch.randn(2, 3, 16, 256, 256, requires_grad=True).to(device=device, dtype=dtype)
+    videos_real = torch.randn(2, 3, 16, 256, 256, requires_grad=True).to(device=device, dtype=dtype)
+
+    trepa_loss = TREPALoss(device=device, with_cp=True)
     loss = trepa_loss(videos_fake, videos_real)
     print(loss)

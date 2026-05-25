@@ -19,6 +19,7 @@ import torch.nn as nn
 from einops import rearrange
 from latentsync.models.stable_syncnet import StableSyncNet
 from latentsync.data.syncnet_dataset import SyncNetDataset
+from latentsync.utils.device import get_device, get_autocast_dtype, supports_fp16
 from diffusers import AutoencoderKL
 from omegaconf import OmegaConf
 from accelerate.utils import set_seed
@@ -27,12 +28,15 @@ from accelerate.utils import set_seed
 def main(config):
     set_seed(config.run.seed)
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = get_device()
+    weight_dtype = get_autocast_dtype(device)
+    use_fp16 = supports_fp16(device)
 
     if config.data.latent_space:
-        vae = AutoencoderKL.from_pretrained(
-            "runwayml/stable-diffusion-inpainting", subfolder="vae", revision="fp16", torch_dtype=torch.float16
-        )
+        vae_kwargs = {"subfolder": "vae", "torch_dtype": weight_dtype}
+        if use_fp16:
+            vae_kwargs["revision"] = "fp16"
+        vae = AutoencoderKL.from_pretrained("runwayml/stable-diffusion-inpainting", **vae_kwargs)
         vae.requires_grad_(False)
         vae.to(device)
 
@@ -55,7 +59,7 @@ def main(config):
     checkpoint = torch.load(config.ckpt.inference_ckpt_path, map_location=device, weights_only=True)
 
     syncnet.load_state_dict(checkpoint["state_dict"])
-    syncnet.to(dtype=torch.float16)
+    syncnet.to(dtype=weight_dtype)
     syncnet.requires_grad_(False)
     syncnet.eval()
 
@@ -70,9 +74,9 @@ def main(config):
         for step, batch in enumerate(test_dataloader):
             ### >>>> Test >>>> ###
 
-            frames = batch["frames"].to(device, dtype=torch.float16)
-            audio_samples = batch["audio_samples"].to(device, dtype=torch.float16)
-            y = batch["y"].to(device, dtype=torch.float16).squeeze(1)
+            frames = batch["frames"].to(device, dtype=weight_dtype)
+            audio_samples = batch["audio_samples"].to(device, dtype=weight_dtype)
+            y = batch["y"].to(device, dtype=weight_dtype).squeeze(1)
 
             if config.data.latent_space:
                 frames = rearrange(frames, "b f c h w -> (b f) c h w")
@@ -93,7 +97,7 @@ def main(config):
 
             sims = nn.functional.cosine_similarity(vision_embeds, audio_embeds)
 
-            preds = (sims > 0.5).to(dtype=torch.float16)
+            preds = (sims > 0.5).to(dtype=weight_dtype)
             num_correct_preds += (preds == y).sum().item()
             num_total_preds += len(sims)
 

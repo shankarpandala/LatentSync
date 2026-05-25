@@ -45,8 +45,12 @@ def adjust_offset(video_input: str, video_output: str, av_offset: int, fps: int 
 
 
 def func(sync_conf_threshold, paths, device_id, process_temp_dir):
+    from latentsync.utils.device import get_device_str
     os.makedirs(process_temp_dir, exist_ok=True)
-    device = f"cuda:{device_id}"
+    if torch.cuda.is_available():
+        device = f"cuda:{device_id}"
+    else:
+        device = get_device_str()
 
     syncnet = SyncNetEval(device=device)
     syncnet.loadParameters("checkpoints/auxiliary/syncnet_v2.model")
@@ -78,10 +82,11 @@ def split(a, n):
 
 
 def sync_av_multi_gpus(input_dir, output_dir, temp_dir, num_workers, sync_conf_threshold):
+    from latentsync.utils.device import device_count
     gather_paths(input_dir, output_dir)
-    num_devices = torch.cuda.device_count()
+    num_devices = max(device_count(), 1)
     if num_devices == 0:
-        raise RuntimeError("No GPUs found")
+        raise RuntimeError("No accelerators found")
     split_paths = list(split(paths, num_workers * num_devices))
     processes = []
 

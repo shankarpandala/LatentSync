@@ -46,6 +46,13 @@ from latentsync.utils.util import (
     one_step_sampling,
 )
 from latentsync.utils.util import plot_loss_chart
+from latentsync.utils.device import (
+    autocast as device_autocast,
+    empty_cache,
+    get_autocast_dtype,
+    make_grad_scaler,
+    supports_fp16,
+)
 from latentsync.whisper.audio2feature import Audio2Feature
 from latentsync.trepa.loss import TREPALoss
 from eval.syncnet import SyncNetEval
@@ -88,11 +95,18 @@ def main(config):
         shutil.copy(config.unet_config_path, output_dir)
         shutil.copy(config.data.syncnet_config_path, output_dir)
 
-    device = torch.device(local_rank)
+    if torch.cuda.is_available():
+        device = torch.device(local_rank)
+    else:
+        from latentsync.utils.device import get_device
+        device = get_device()
+    weight_dtype = get_autocast_dtype(device)
+    use_fp16 = supports_fp16(device)
+    mixed_precision_enabled = config.run.mixed_precision_training and use_fp16
 
     noise_scheduler = DDIMScheduler.from_pretrained("configs")
 
-    vae = AutoencoderKL.from_pretrained("stabilityai/sd-vae-ft-mse", torch_dtype=torch.float16)
+    vae = AutoencoderKL.from_pretrained("stabilityai/sd-vae-ft-mse", torch_dtype=weight_dtype)
     vae.config.scaling_factor = 0.18215
     vae.config.shift_factor = 0
 
@@ -134,7 +148,7 @@ def main(config):
         if syncnet_config.ckpt.inference_ckpt_path == "":
             raise ValueError("SyncNet path is not provided")
         syncnet = StableSyncNet(OmegaConf.to_container(syncnet_config.model), gradient_checkpointing=True).to(
-            device=device, dtype=torch.float16
+            device=device, dtype=weight_dtype
         )
         syncnet_checkpoint = torch.load(
             syncnet_config.ckpt.inference_ckpt_path, map_location=device, weights_only=True
@@ -143,7 +157,7 @@ def main(config):
         syncnet.requires_grad_(False)
 
         del syncnet_checkpoint
-        torch.cuda.empty_cache()
+        empty_cache(device)
 
     if config.model.use_motion_module:
         unet.requires_grad_(False)
@@ -220,8 +234,11 @@ def main(config):
     ).to(device)
     pipeline.set_progress_bar_config(disable=True)
 
-    # DDP warpper
-    unet = DDP(unet, device_ids=[local_rank], output_device=local_rank)
+    # DDP wrapper. device_ids only applies to CUDA single-device training.
+    if device.type == "cuda":
+        unet = DDP(unet, device_ids=[local_rank], output_device=local_rank)
+    else:
+        unet = DDP(unet)
 
     # We need to recalculate our total training steps as the size of the training dataloader may have changed.
     num_update_steps_per_epoch = math.ceil(len(train_dataloader))
@@ -253,8 +270,8 @@ def main(config):
     val_step_list = []
     sync_conf_list = []
 
-    # Support mixed-precision training
-    scaler = torch.amp.GradScaler("cuda") if config.run.mixed_precision_training else None
+    # Support mixed-precision training (only effective on CUDA).
+    scaler = make_grad_scaler(device, enabled=mixed_precision_enabled)
 
     for epoch in range(first_epoch, num_train_epochs):
         train_dataloader.sampler.set_epoch(epoch)
@@ -265,7 +282,7 @@ def main(config):
 
             if config.model.add_audio_layer:
                 if batch["mel"] != []:
-                    mel = batch["mel"].to(device, dtype=torch.float16)
+                    mel = batch["mel"].to(device, dtype=weight_dtype)
 
                 audio_embeds_list = []
                 try:
@@ -281,15 +298,15 @@ def main(config):
                     logger.info(f"{type(e).__name__} - {e} - {video_path}")
                     continue
                 audio_embeds = torch.stack(audio_embeds_list)  # (B, 16, 50, 384)
-                audio_embeds = audio_embeds.to(device, dtype=torch.float16)
+                audio_embeds = audio_embeds.to(device, dtype=weight_dtype)
             else:
                 audio_embeds = None
 
             # Convert videos to latent space
-            gt_pixel_values = batch["gt_pixel_values"].to(device, dtype=torch.float16)
-            masked_pixel_values = batch["masked_pixel_values"].to(device, dtype=torch.float16)
-            masks = batch["masks"].to(device, dtype=torch.float16)
-            ref_pixel_values = batch["ref_pixel_values"].to(device, dtype=torch.float16)
+            gt_pixel_values = batch["gt_pixel_values"].to(device, dtype=weight_dtype)
+            masked_pixel_values = batch["masked_pixel_values"].to(device, dtype=weight_dtype)
+            masks = batch["masks"].to(device, dtype=weight_dtype)
+            ref_pixel_values = batch["ref_pixel_values"].to(device, dtype=weight_dtype)
 
             gt_pixel_values = rearrange(gt_pixel_values, "b f c h w -> (b f) c h w")
             masked_pixel_values = rearrange(masked_pixel_values, "b f c h w -> (b f) c h w")
@@ -352,8 +369,8 @@ def main(config):
             unet_input = torch.cat([noisy_gt_latents, masks, masked_latents, ref_latents], dim=1)
 
             # Predict the noise and compute loss
-            # Mixed-precision training
-            with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=config.run.mixed_precision_training):
+            # Mixed-precision training (no-op on non-CUDA devices)
+            with device_autocast(device, dtype=torch.float16, enabled=mixed_precision_enabled):
                 pred_noise = unet(unet_input, timesteps, encoder_hidden_states=audio_embeds).sample
 
             if config.run.recon_loss_weight != 0:
@@ -423,8 +440,8 @@ def main(config):
 
             optimizer.zero_grad()
 
-            # Backpropagate
-            if config.run.mixed_precision_training:
+            # Backpropagate (use the scaler only if one was created for this device)
+            if scaler is not None:
                 scaler.scale(loss).backward()
                 """ >>> gradient clipping >>> """
                 scaler.unscale_(optimizer)
@@ -466,7 +483,7 @@ def main(config):
 
                 validation_video_out_path = os.path.join(output_dir, f"val_videos/val_video_{global_step}.mp4")
 
-                with torch.autocast(device_type="cuda", dtype=torch.float16):
+                with device_autocast(device, dtype=torch.float16, enabled=use_fp16):
                     pipeline(
                         config.data.val_video_path,
                         config.data.val_audio_path,
@@ -474,7 +491,7 @@ def main(config):
                         num_frames=config.data.num_frames,
                         num_inference_steps=config.run.inference_steps,
                         guidance_scale=config.run.guidance_scale,
-                        weight_dtype=torch.float16,
+                        weight_dtype=weight_dtype,
                         width=config.data.resolution,
                         height=config.data.resolution,
                         mask_image_path=config.data.mask_image_path,

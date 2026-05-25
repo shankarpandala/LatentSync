@@ -14,6 +14,7 @@
 
 from latentsync.utils.util import write_video
 from latentsync.utils.image_processor import VideoProcessor
+from latentsync.utils.device import get_device, get_device_str, device_count
 import torch
 import os
 import subprocess
@@ -55,7 +56,11 @@ def combine_video_audio(video_frames, video_input_path, video_output_path, proce
 
 def func(paths, process_temp_dir, device_id, resolution):
     os.makedirs(process_temp_dir, exist_ok=True)
-    video_processor = VideoProcessor(resolution, f"cuda:{device_id}")
+    if torch.cuda.is_available():
+        device_str = f"cuda:{device_id}"
+    else:
+        device_str = get_device_str()
+    video_processor = VideoProcessor(resolution, device_str)
 
     for video_input, video_output in paths:
         if os.path.isfile(video_output):
@@ -79,9 +84,9 @@ def split(a, n):
 def affine_transform_multi_gpus(input_dir, output_dir, temp_dir, resolution, num_workers):
     print(f"Recursively gathering video paths of {input_dir} ...")
     gather_video_paths(input_dir, output_dir)
-    num_devices = torch.cuda.device_count()
+    num_devices = max(device_count(), 1)
     if num_devices == 0:
-        raise RuntimeError("No GPUs found")
+        raise RuntimeError("No accelerators found")
 
     if os.path.exists(temp_dir):
         shutil.rmtree(temp_dir)

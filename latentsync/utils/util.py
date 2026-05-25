@@ -135,14 +135,30 @@ def write_video_cv2(video_output_path: str, video_frames: np.ndarray, fps: int):
     out.release()
 
 
-def init_dist(backend="nccl", **kwargs):
-    """Initializes distributed environment."""
+def init_dist(backend=None, **kwargs):
+    """Initializes distributed environment.
+
+    On CUDA, uses NCCL and pins each rank to a GPU. On MPS/CPU, falls back to
+    gloo with a single virtual device (no per-rank pinning).
+    """
+    from .device import distributed_backend, get_device, set_device
+
     rank = int(os.environ["RANK"])
-    num_gpus = torch.cuda.device_count()
-    if num_gpus == 0:
-        raise RuntimeError("No GPUs available for training.")
-    local_rank = rank % num_gpus
-    torch.cuda.set_device(local_rank)
+    device = get_device()
+
+    if backend is None:
+        backend = distributed_backend(device)
+
+    if device.type == "cuda":
+        num_gpus = torch.cuda.device_count()
+        if num_gpus == 0:
+            raise RuntimeError("No GPUs available for training.")
+        local_rank = rank % num_gpus
+        set_device(local_rank)
+    else:
+        # MPS and CPU don't have a meaningful per-rank device index.
+        local_rank = 0
+
     dist.init_process_group(backend=backend, **kwargs)
 
     return local_rank

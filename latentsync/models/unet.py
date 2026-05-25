@@ -25,6 +25,7 @@ from .unet_blocks import (
 from .resnet import InflatedConv3d, InflatedGroupNorm
 
 from ..utils.util import zero_rank_log
+from ..utils.device import empty_cache
 from .utils import zero_module
 
 
@@ -505,7 +506,7 @@ class UNet3DConditionModel(ModelMixin, ConfigMixin):
             unet.load_state_dict(ckpt["state_dict"], strict=False)
 
             del ckpt
-            torch.cuda.empty_cache()
+            empty_cache(device)
         else:
             resume_global_step = 0
 

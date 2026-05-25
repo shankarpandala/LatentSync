@@ -32,6 +32,12 @@ import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data.distributed import DistributedSampler
 from latentsync.utils.util import init_dist, cosine_loss, dummy_context
+from latentsync.utils.device import (
+    autocast as device_autocast,
+    get_autocast_dtype,
+    make_grad_scaler,
+    supports_fp16,
+)
 
 logger = get_logger(__name__)
 
@@ -64,10 +70,17 @@ def main(config):
         os.makedirs(f"{output_dir}/loss_charts", exist_ok=True)
         shutil.copy(config.config_path, output_dir)
 
-    device = torch.device(local_rank)
+    if torch.cuda.is_available():
+        device = torch.device(local_rank)
+    else:
+        from latentsync.utils.device import get_device
+        device = get_device()
+    weight_dtype = get_autocast_dtype(device)
+    use_fp16 = supports_fp16(device)
+    mixed_precision_enabled = config.run.mixed_precision_training and use_fp16
 
     if config.data.latent_space:
-        vae = AutoencoderKL.from_pretrained("stabilityai/sd-vae-ft-mse", torch_dtype=torch.float16)
+        vae = AutoencoderKL.from_pretrained("stabilityai/sd-vae-ft-mse", torch_dtype=weight_dtype)
         vae.requires_grad_(False)
         vae.to(device)
     else:
@@ -141,8 +154,11 @@ def main(config):
             val_step_list = ckpt["val_step_list"]
             val_loss_list = ckpt["val_loss_list"]
 
-    # DDP wrapper
-    syncnet = DDP(syncnet, device_ids=[local_rank], output_device=local_rank)
+    # DDP wrapper. device_ids only applies to CUDA single-device training.
+    if device.type == "cuda":
+        syncnet = DDP(syncnet, device_ids=[local_rank], output_device=local_rank)
+    else:
+        syncnet = DDP(syncnet)
 
     num_update_steps_per_epoch = math.ceil(len(train_dataloader))
     num_train_epochs = math.ceil(config.run.max_train_steps / num_update_steps_per_epoch)
@@ -165,8 +181,8 @@ def main(config):
         range(0, config.run.max_train_steps), initial=global_step, desc="Steps", disable=not is_main_process
     )
 
-    # Support mixed-precision training
-    scaler = torch.amp.GradScaler("cuda") if config.run.mixed_precision_training else None
+    # Support mixed-precision training (only effective on CUDA).
+    scaler = make_grad_scaler(device, enabled=mixed_precision_enabled)
 
     for epoch in range(first_epoch, num_train_epochs):
         train_dataloader.sampler.set_epoch(epoch)
@@ -177,8 +193,8 @@ def main(config):
         for index, batch in enumerate(train_dataloader):
             ### >>>> Training >>>> ###
 
-            frames = batch["frames"].to(device, dtype=torch.float16)
-            audio_samples = batch["audio_samples"].to(device, dtype=torch.float16)
+            frames = batch["frames"].to(device, dtype=weight_dtype)
+            audio_samples = batch["audio_samples"].to(device, dtype=weight_dtype)
             y = batch["y"].to(device, dtype=torch.float32)
 
             if config.data.latent_space:
@@ -212,28 +228,33 @@ def main(config):
 
             # Disable gradient sync for the first N-1 steps, enable sync on the final step
             with syncnet.no_sync() if (index + 1) % config.data.gradient_accumulation_steps != 0 else dummy_context():
-                # Mixed-precision training
-                with torch.autocast(
-                    device_type="cuda", dtype=torch.float16, enabled=config.run.mixed_precision_training
-                ):
+                # Mixed-precision training (no-op on non-CUDA devices)
+                with device_autocast(device, dtype=torch.float16, enabled=mixed_precision_enabled):
                     vision_embeds, audio_embeds = syncnet(frames, audio_samples)
 
                 loss = cosine_loss(vision_embeds.float(), audio_embeds.float(), y).mean()
                 loss = loss / config.data.gradient_accumulation_steps
 
-                # Backpropagate
-                scaler.scale(loss).backward()
+                # Backpropagate (use the scaler only if one was created for this device)
+                if scaler is not None:
+                    scaler.scale(loss).backward()
+                else:
+                    loss.backward()
 
             step_loss += gather_loss(loss, device)
 
             # Update parameters when the accumulation steps are reached
             if (index + 1) % config.data.gradient_accumulation_steps == 0:
                 """>>> gradient clipping >>>"""
-                scaler.unscale_(optimizer)
+                if scaler is not None:
+                    scaler.unscale_(optimizer)
                 torch.nn.utils.clip_grad_norm_(syncnet.parameters(), config.optimizer.max_grad_norm)
                 """ <<< gradient clipping <<< """
-                scaler.step(optimizer)
-                scaler.update()
+                if scaler is not None:
+                    scaler.step(optimizer)
+                    scaler.update()
+                else:
+                    optimizer.step()
                 optimizer.zero_grad()
 
                 progress_bar.update(1)
@@ -297,8 +318,8 @@ def validation(val_dataloader, device, syncnet, latent_space, lower_half, vae, n
         for index, batch in enumerate(val_dataloader):
             ### >>>> Validation >>>> ###
 
-            frames = batch["frames"].to(device, dtype=torch.float16)
-            audio_samples = batch["audio_samples"].to(device, dtype=torch.float16)
+            frames = batch["frames"].to(device, dtype=get_autocast_dtype(device))
+            audio_samples = batch["audio_samples"].to(device, dtype=get_autocast_dtype(device))
             y = batch["y"].to(device, dtype=torch.float32)
 
             if latent_space:
@@ -313,7 +334,7 @@ def validation(val_dataloader, device, syncnet, latent_space, lower_half, vae, n
                 height = frames.shape[2]
                 frames = frames[:, :, height // 2 :, :]
 
-            with torch.autocast(device_type="cuda", dtype=torch.float16):
+            with device_autocast(device, dtype=torch.float16, enabled=supports_fp16(device)):
                 vision_embeds, audio_embeds = syncnet(frames, audio_samples)
 
             loss = cosine_loss(vision_embeds.float(), audio_embeds.float(), y).mean()
