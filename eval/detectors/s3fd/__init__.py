@@ -6,6 +6,7 @@ from torchvision import transforms
 from .nets import S3FDNet
 from .box_utils import nms_
 from latentsync.utils.util import check_model_and_download
+from latentsync.utils.device import get_device_str
 
 PATH_WEIGHT = "checkpoints/auxiliary/sfd_face.pth"
 img_mean = np.array([104.0, 117.0, 123.0])[:, np.newaxis, np.newaxis].astype("float32")
@@ -13,7 +14,9 @@ img_mean = np.array([104.0, 117.0, 123.0])[:, np.newaxis, np.newaxis].astype("fl
 
 class S3FD:
 
-    def __init__(self, device="cuda"):
+    def __init__(self, device=None):
+        if device is None:
+            device = get_device_str()
 
         tstamp = time.time()
         self.device = device

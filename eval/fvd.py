@@ -26,7 +26,10 @@ def compute_stats(feats: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
 
 
 @torch.no_grad()
-def compute_our_fvd(videos_fake: np.ndarray, videos_real: np.ndarray, device: str = "cuda") -> float:
+def compute_our_fvd(videos_fake: np.ndarray, videos_real: np.ndarray, device: str = None) -> float:
+    if device is None:
+        from latentsync.utils.device import get_device_str
+        device = get_device_str()
     i3d_path = "checkpoints/auxiliary/i3d_torchscript.pt"
     check_model_and_download(i3d_path)
     i3d_kwargs = dict(

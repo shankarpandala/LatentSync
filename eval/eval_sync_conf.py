@@ -19,6 +19,7 @@ from statistics import fmean
 from eval.syncnet import SyncNetEval
 from eval.syncnet_detect import SyncNetDetector
 from latentsync.utils.util import red_text
+from latentsync.utils.device import get_device_str
 import torch
 
 
@@ -50,7 +51,7 @@ def main():
 
     args = parser.parse_args()
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = get_device_str()
 
     syncnet = SyncNetEval(device=device)
     syncnet.loadParameters(args.initial_model)

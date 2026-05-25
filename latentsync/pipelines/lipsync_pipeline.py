@@ -33,6 +33,7 @@ import cv2
 from ..models.unet import UNet3DConditionModel
 from ..utils.util import read_video, read_audio, write_video, check_ffmpeg_installed
 from ..utils.image_processor import ImageProcessor, load_fixed_mask
+from ..utils.device import get_autocast_dtype
 from ..whisper.audio2feature import Audio2Feature
 import tqdm
 import soundfile as sf
@@ -322,7 +323,7 @@ class LipsyncPipeline(DiffusionPipeline):
         width: Optional[int] = None,
         num_inference_steps: int = 20,
         guidance_scale: float = 1.5,
-        weight_dtype: Optional[torch.dtype] = torch.float16,
+        weight_dtype: Optional[torch.dtype] = None,
         eta: float = 0.0,
         mask_image_path: str = "latentsync/utils/mask.png",
         temp_dir: str = "temp",
@@ -338,8 +339,10 @@ class LipsyncPipeline(DiffusionPipeline):
 
         # 0. Define call parameters
         device = self._execution_device
+        if weight_dtype is None:
+            weight_dtype = get_autocast_dtype(device)
         mask_image = load_fixed_mask(height, mask_image_path)
-        self.image_processor = ImageProcessor(height, device="cuda", mask_image=mask_image)
+        self.image_processor = ImageProcessor(height, device=device, mask_image=mask_image)
         self.set_progress_bar_config(desc=f"Sample frames: {num_frames}")
 
         # 1. Default height and width to unet

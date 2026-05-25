@@ -54,7 +54,11 @@ def read_video(video_path: str):
 
 
 def func(paths, device_id):
-    device = f"cuda:{device_id}"
+    from latentsync.utils.device import get_device_str
+    if torch.cuda.is_available():
+        device = f"cuda:{device_id}"
+    else:
+        device = get_device_str()
 
     model_hyper = HyperNet(16, 112, 224, 112, 56, 28, 14, 7).to(device)
     model_hyper.train(False)
@@ -103,10 +107,11 @@ def split(a, n):
 
 
 def filter_visual_quality_multi_gpus(input_dir, output_dir, num_workers):
+    from latentsync.utils.device import device_count
     gather_paths(input_dir, output_dir)
-    num_devices = torch.cuda.device_count()
+    num_devices = max(device_count(), 1)
     if num_devices == 0:
-        raise RuntimeError("No GPUs found")
+        raise RuntimeError("No accelerators found")
     split_paths = list(split(paths, num_workers * num_devices))
     processes = []
 

@@ -6,9 +6,11 @@ import torch
 from einops import rearrange
 import kornia
 
+from .device import supports_fp16
+
 
 class AlignRestore(object):
-    def __init__(self, align_points=3, resolution=256, device="cpu", dtype=torch.float16):
+    def __init__(self, align_points=3, resolution=256, device="cpu", dtype=None):
         if align_points == 3:
             self.upscale_factor = 1
             ratio = resolution / 256 * 2.8
@@ -17,10 +19,12 @@ class AlignRestore(object):
             self.face_template = self.face_template * ratio
             self.face_size = (int(75 * self.crop_ratio[0]), int(100 * self.crop_ratio[1]))
             self.p_bias = None
-            self.device = device
+            self.device = torch.device(device) if not isinstance(device, torch.device) else device
+            if dtype is None:
+                dtype = torch.float16 if supports_fp16(self.device) else torch.float32
             self.dtype = dtype
-            self.fill_value = torch.tensor([127, 127, 127], device=device, dtype=dtype)
-            self.mask = torch.ones((1, 1, self.face_size[1], self.face_size[0]), device=device, dtype=dtype)
+            self.fill_value = torch.tensor([127, 127, 127], device=self.device, dtype=dtype)
+            self.mask = torch.ones((1, 1, self.face_size[1], self.face_size[0]), device=self.device, dtype=dtype)
 
     def align_warp_face(self, img, landmarks3, smooth=True):
         affine_matrix, self.p_bias = self.transformation_from_points(

@@ -44,15 +44,17 @@ def loop(cuda_device):
 
 
 def main():
-    if torch.cuda.is_available():
-        num_processes = torch.cuda.device_count()
-        processes = list()
-        for i in range(num_processes):
-            p = mp.Process(target=loop, args=(i,))
-            p.start()
-            processes.append(p)
-        for p in processes:
-            p.join()
+    if not torch.cuda.is_available():
+        print("occupy_gpu.py is a CUDA-only tool (uses nvidia-smi). No CUDA GPU available; exiting.")
+        return
+    num_processes = torch.cuda.device_count()
+    processes = list()
+    for i in range(num_processes):
+        p = mp.Process(target=loop, args=(i,))
+        p.start()
+        processes.append(p)
+    for p in processes:
+        p.join()
 
 
 if __name__ == "__main__":

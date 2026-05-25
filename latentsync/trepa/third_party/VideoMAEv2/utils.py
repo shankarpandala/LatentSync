@@ -78,5 +78,11 @@ def load_videomae_model(device, ckpt_path=None, with_cp=False):
     model.load_state_dict(ckpt)
 
     del ckpt
-    torch.cuda.empty_cache()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+        try:
+            torch.mps.empty_cache()
+        except AttributeError:
+            pass
     return model.to(device)

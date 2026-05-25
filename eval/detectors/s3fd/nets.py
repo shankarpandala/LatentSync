@@ -27,8 +27,11 @@ class L2Norm(nn.Module):
 
 class S3FDNet(nn.Module):
 
-    def __init__(self, device='cuda'):
+    def __init__(self, device=None):
         super(S3FDNet, self).__init__()
+        if device is None:
+            from latentsync.utils.device import get_device_str
+            device = get_device_str()
         self.device = device
 
         self.vgg = nn.ModuleList([
